@@ -18,20 +18,20 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ExtraFormData,
   QueryFormData,
   styled,
   SuperChart,
+  DataMask,
   t,
+  Behavior,
 } from '@superset-ui/core';
 import { areObjectsEqual } from 'src/reduxUtils';
 import { getChartDataRequest } from 'src/chart/chartAction';
 import Loading from 'src/components/Loading';
 import BasicErrorAlert from 'src/components/ErrorMessage/BasicErrorAlert';
-import { CurrentFilterState } from 'src/dashboard/reducers/types';
 import { FilterProps } from './types';
 import { getFormData } from '../utils';
-import { useCascadingFilters, useFilterState } from './state';
+import { useCascadingFilters } from './state';
 
 const StyledLoadingBox = styled.div`
   position: relative;
@@ -48,37 +48,33 @@ const FilterValue: React.FC<FilterProps> = ({
   directPathToChild,
   onFilterSelectionChange,
 }) => {
-  const {
-    id,
-    allowsMultipleValues,
-    inverseSelection,
-    targets,
-    defaultValue,
-    filterType,
-  } = filter;
+  const { id, targets, filterType } = filter;
   const cascadingFilters = useCascadingFilters(id);
-  const filterState = useFilterState(id);
-  const [loading, setLoading] = useState<boolean>(true);
   const [state, setState] = useState([]);
   const [error, setError] = useState<boolean>(false);
   const [formData, setFormData] = useState<Partial<QueryFormData>>({});
   const inputRef = useRef<HTMLInputElement>(null);
   const [target] = targets;
-  const { datasetId = 18, column } = target;
+  const {
+    datasetId,
+    column = {},
+  }: Partial<{ datasetId: number; column: { name?: string } }> = target;
   const { name: groupby } = column;
-  const currentValue = filterState.currentState?.value;
+  const hasDataSource = !!datasetId;
+  const [loading, setLoading] = useState<boolean>(hasDataSource);
   useEffect(() => {
     const newFormData = getFormData({
+      ...filter,
       datasetId,
       cascadingFilters,
       groupby,
-      allowsMultipleValues,
-      defaultValue,
-      currentValue,
-      inverseSelection,
+      inputRef,
     });
-    if (!areObjectsEqual(formData || {}, newFormData)) {
+    if (!areObjectsEqual(formData, newFormData)) {
       setFormData(newFormData);
+      if (!hasDataSource) {
+        return;
+      }
       getChartDataRequest({
         formData: newFormData,
         force: false,
@@ -94,7 +90,13 @@ const FilterValue: React.FC<FilterProps> = ({
           setLoading(false);
         });
     }
-  }, [cascadingFilters, datasetId, groupby, defaultValue, currentValue]);
+  }, [
+    cascadingFilters,
+    datasetId,
+    groupby,
+    JSON.stringify(filter),
+    hasDataSource,
+  ]);
 
   useEffect(() => {
     if (directPathToChild?.[0] === filter.id) {
@@ -107,13 +109,8 @@ const FilterValue: React.FC<FilterProps> = ({
     return undefined;
   }, [inputRef, directPathToChild, filter.id]);
 
-  const setExtraFormData = ({
-    extraFormData,
-    currentState,
-  }: {
-    extraFormData: ExtraFormData;
-    currentState: CurrentFilterState;
-  }) => onFilterSelectionChange(filter, extraFormData, currentState);
+  const setDataMask = (dataMask: DataMask) =>
+    onFilterSelectionChange(filter, dataMask);
 
   if (loading) {
     return (
@@ -139,10 +136,11 @@ const FilterValue: React.FC<FilterProps> = ({
         height={20}
         width={220}
         formData={formData}
-        queriesData={state}
+        // For charts that don't have datasource we need workaround for empty placeholder
+        queriesData={hasDataSource ? state : [{ data: [{}] }]}
         chartType={filterType}
-        // @ts-ignore (update superset-ui)
-        hooks={{ setExtraFormData }}
+        behaviors={[Behavior.NATIVE_FILTER]}
+        hooks={{ setDataMask }}
       />
     </FilterItem>
   );

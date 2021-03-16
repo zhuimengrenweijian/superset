@@ -18,21 +18,25 @@
  */
 import React, { useRef } from 'react';
 import { useDrag, useDrop, DropTargetMonitor } from 'react-dnd';
-import { styled, useTheme } from '@superset-ui/core';
-import { ColumnOption } from '@superset-ui/chart-controls';
+import { styled, t, useTheme } from '@superset-ui/core';
+import {
+  MetricOption,
+  InfoTooltipWithTrigger,
+} from '@superset-ui/chart-controls';
 import { Tooltip } from 'src/common/components/Tooltip';
 import Icon from 'src/components/Icon';
 import { savedMetricType } from 'src/explore/components/controls/MetricControl/types';
+import AdhocMetric from './controls/MetricControl/AdhocMetric';
 
-const DragContainer = styled.div`
+export const DragContainer = styled.div`
   margin-bottom: ${({ theme }) => theme.gridUnit}px;
   :last-child {
     margin-bottom: 0;
   }
 `;
 
-const OptionControlContainer = styled.div<{
-  isAdhoc?: boolean;
+export const OptionControlContainer = styled.div<{
+  withCaret?: boolean;
 }>`
   display: flex;
   align-items: center;
@@ -41,11 +45,11 @@ const OptionControlContainer = styled.div<{
   height: ${({ theme }) => theme.gridUnit * 6}px;
   background-color: ${({ theme }) => theme.colors.grayscale.light3};
   border-radius: 3px;
-  cursor: ${({ isAdhoc }) => (isAdhoc ? 'pointer' : 'default')};
+  cursor: ${({ withCaret }) => (withCaret ? 'pointer' : 'default')};
 `;
 
-const Label = styled.div`
-  display: inline-block;
+export const Label = styled.div`
+  display: flex;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -60,17 +64,21 @@ const Label = styled.div`
   }
 `;
 
-const CaretContainer = styled.div`
+export const CaretContainer = styled.div`
   height: 100%;
   border-left: solid 1px ${({ theme }) => theme.colors.grayscale.dark2}0C;
   margin-left: auto;
 `;
 
-const CloseContainer = styled.div`
+export const CloseContainer = styled.div`
   height: 100%;
   width: ${({ theme }) => theme.gridUnit * 6}px;
   border-right: solid 1px ${({ theme }) => theme.colors.grayscale.dark2}0C;
   cursor: pointer;
+`;
+
+const StyledInfoTooltipWithTrigger = styled(InfoTooltipWithTrigger)`
+  margin: 0 ${({ theme }) => theme.gridUnit}px;
 `;
 
 export const HeaderContainer = styled.div`
@@ -85,7 +93,26 @@ export const LabelsContainer = styled.div`
   border-radius: ${({ theme }) => theme.gridUnit}px;
 `;
 
-export const AddControlLabel = styled.div`
+export const DndLabelsContainer = styled.div<{
+  canDrop?: boolean;
+  isOver?: boolean;
+}>`
+  padding: ${({ theme }) => theme.gridUnit}px;
+  border: ${({ canDrop, isOver, theme }) => {
+    if (canDrop) {
+      return `dashed 1px ${theme.colors.info.dark1}`;
+    }
+    if (isOver && !canDrop) {
+      return `dashed 1px ${theme.colors.error.dark1}`;
+    }
+    return `solid 1px ${theme.colors.grayscale.light2}`;
+  }};
+  border-radius: ${({ theme }) => theme.gridUnit}px;
+`;
+
+export const AddControlLabel = styled.div<{
+  cancelHover?: boolean;
+}>`
   display: flex;
   align-items: center;
   width: 100%;
@@ -95,14 +122,16 @@ export const AddControlLabel = styled.div`
   color: ${({ theme }) => theme.colors.grayscale.light1};
   border: dashed 1px ${({ theme }) => theme.colors.grayscale.light2};
   border-radius: ${({ theme }) => theme.gridUnit}px;
-  cursor: pointer;
+  cursor: ${({ cancelHover }) => (cancelHover ? 'inherit' : 'pointer')};
 
   :hover {
-    background-color: ${({ theme }) => theme.colors.grayscale.light4};
+    background-color: ${({ cancelHover, theme }) =>
+      cancelHover ? 'inherit' : theme.colors.grayscale.light4};
   }
 
   :active {
-    background-color: ${({ theme }) => theme.colors.grayscale.light3};
+    background-color: ${({ cancelHover, theme }) =>
+      cancelHover ? 'inherit' : theme.colors.grayscale.light3};
   }
 `;
 
@@ -131,25 +160,29 @@ interface DragItem {
 export const OptionControlLabel = ({
   label,
   savedMetric,
+  adhocMetric,
   onRemove,
   onMoveLabel,
   onDropLabel,
-  isAdhoc,
+  withCaret,
   isFunction,
   type,
   index,
+  isExtra,
   ...props
 }: {
   label: string | React.ReactNode;
   savedMetric?: savedMetricType;
+  adhocMetric?: AdhocMetric;
   onRemove: () => void;
   onMoveLabel: (dragIndex: number, hoverIndex: number) => void;
   onDropLabel: () => void;
-  isAdhoc?: boolean;
+  withCaret?: boolean;
   isFunction?: boolean;
   isDraggable?: boolean;
   type: string;
   index: number;
+  isExtra?: boolean;
 }) => {
   const theme = useTheme();
   const ref = useRef<HTMLDivElement>(null);
@@ -201,7 +234,11 @@ export const OptionControlLabel = ({
     },
   });
   const [, drag] = useDrag({
-    item: { type, index },
+    item: {
+      type,
+      index,
+      value: savedMetric?.metric_name ? savedMetric : adhocMetric,
+    },
     collect: monitor => ({
       isDragging: monitor.isDragging(),
     }),
@@ -209,19 +246,14 @@ export const OptionControlLabel = ({
 
   const getLabelContent = () => {
     if (savedMetric?.metric_name) {
-      // add column_name to fix typescript error
-      const column = { ...savedMetric, column_name: '' };
-      if (!column.verbose_name) {
-        column.verbose_name = column.metric_name;
-      }
-      return <ColumnOption column={column} />;
+      return <MetricOption metric={savedMetric} />;
     }
     return <Tooltip title={label}>{label}</Tooltip>;
   };
 
   const getOptionControlContent = () => (
     <OptionControlContainer
-      isAdhoc={isAdhoc}
+      withCaret={withCaret}
       data-test="option-label"
       {...props}
     >
@@ -236,7 +268,18 @@ export const OptionControlLabel = ({
         {isFunction && <Icon name="function" viewBox="0 0 16 11" />}
         {getLabelContent()}
       </Label>
-      {isAdhoc && (
+      {isExtra && (
+        <StyledInfoTooltipWithTrigger
+          icon="exclamation-triangle"
+          placement="top"
+          bsStyle="warning"
+          tooltip={t(`
+                This filter was inherited from the dashboard's context.
+                It won't be saved when saving the chart.
+              `)}
+        />
+      )}
+      {withCaret && (
         <CaretContainer>
           <Icon name="caret-right" color={theme.colors.grayscale.light1} />
         </CaretContainer>

@@ -23,6 +23,7 @@ from typing import Any, Callable, cast, Dict, List, Optional, Union
 from urllib import parse
 
 import backoff
+import humanize
 import pandas as pd
 import simplejson as json
 from flask import abort, flash, g, Markup, redirect, render_template, request, Response
@@ -92,10 +93,7 @@ from superset.models.slice import Slice
 from superset.models.sql_lab import Query, TabState
 from superset.models.user_attributes import UserAttribute
 from superset.queries.dao import QueryDAO
-from superset.security.analytics_db_safety import (
-    check_sqlalchemy_uri,
-    DBSecurityException,
-)
+from superset.security.analytics_db_safety import check_sqlalchemy_uri
 from superset.sql_parse import CtasMethod, ParsedQuery, Table
 from superset.sql_validators import get_validator_by_name
 from superset.tasks.async_queries import load_explore_json_into_cache
@@ -103,6 +101,7 @@ from superset.typing import FlaskResponse
 from superset.utils import core as utils
 from superset.utils.async_query_manager import AsyncQueryTokenException
 from superset.utils.cache import etag_cache
+from superset.utils.core import ReservedUrlParameters
 from superset.utils.dates import now_as_float
 from superset.utils.decorators import check_dashboard_access
 from superset.views.base import (
@@ -400,9 +399,10 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
         endpoint = "/superset/explore/?form_data={}".format(
             parse.quote(json.dumps({"slice_id": slice_id}))
         )
-        param = utils.ReservedUrlParameters.STANDALONE.value
-        if request.args.get(param) == "true":
-            endpoint += f"&{param}=true"
+
+        is_standalone_mode = ReservedUrlParameters.is_standalone_mode()
+        if is_standalone_mode:
+            endpoint += f"&{ReservedUrlParameters.STANDALONE}={is_standalone_mode}"
         return redirect(endpoint)
 
     def get_query_string_response(self, viz_obj: BaseViz) -> FlaskResponse:
@@ -621,7 +621,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
 
     @has_access
     @event_logger.log_this
-    @expose("/import_dashboards", methods=["GET", "POST"])
+    @expose("/import_dashboards/", methods=["GET", "POST"])
     def import_dashboards(self) -> FlaskResponse:
         """Overrides the dashboards using json instances from the file."""
         import_file = request.files.get("file")
@@ -666,7 +666,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
     @event_logger.log_this
     @expose("/explore/<datasource_type>/<int:datasource_id>/", methods=["GET", "POST"])
     @expose("/explore/", methods=["GET", "POST"])
-    def explore(  # pylint: disable=too-many-locals,too-many-return-statements
+    def explore(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-statements
         self, datasource_type: Optional[str] = None, datasource_id: Optional[int] = None
     ) -> FlaskResponse:
         user_id = g.user.get_id() if g.user else None
@@ -764,13 +764,13 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
         if action == "overwrite" and not slice_overwrite_perm:
             return json_error_response(
                 _("You don't have the rights to ") + _("alter this ") + _("chart"),
-                status=400,
+                status=403,
             )
 
         if action == "saveas" and not slice_add_perm:
             return json_error_response(
                 _("You don't have the rights to ") + _("create a ") + _("chart"),
-                status=400,
+                status=403,
             )
 
         if action in ("saveas", "overwrite") and datasource:
@@ -783,26 +783,29 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
                 datasource.type,
                 datasource.name,
             )
-
-        standalone = (
-            request.args.get(utils.ReservedUrlParameters.STANDALONE.value) == "true"
-        )
+        standalone_mode = ReservedUrlParameters.is_standalone_mode()
         dummy_datasource_data: Dict[str, Any] = {
             "type": datasource_type,
             "name": datasource_name,
             "columns": [],
             "metrics": [],
+            "database": {"id": 0, "backend": "",},
         }
+        try:
+            datasource_data = datasource.data if datasource else dummy_datasource_data
+        except (SupersetException, SQLAlchemyError):
+            datasource_data = dummy_datasource_data
+
         bootstrap_data = {
             "can_add": slice_add_perm,
             "can_download": slice_download_perm,
             "can_overwrite": slice_overwrite_perm,
-            "datasource": datasource.data if datasource else dummy_datasource_data,
+            "datasource": datasource_data,
             "form_data": form_data,
             "datasource_id": datasource_id,
             "datasource_type": datasource_type,
             "slice": slc.data if slc else None,
-            "standalone": standalone,
+            "standalone": standalone_mode,
             "user_id": user_id,
             "forced_height": request.args.get("height"),
             "common": common_bootstrap_payload(),
@@ -826,7 +829,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
             ),
             entry="explore",
             title=title,
-            standalone_mode=standalone,
+            standalone_mode=standalone_mode,
         )
 
     @api
@@ -929,7 +932,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
                     _("You don't have the rights to ")
                     + _("alter this ")
                     + _("dashboard"),
-                    status=400,
+                    status=403,
                 )
 
             flash(
@@ -947,7 +950,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
                     _("You don't have the rights to ")
                     + _("create a ")
                     + _("dashboard"),
-                    status=400,
+                    status=403,
                 )
 
             dash = Dashboard(
@@ -989,7 +992,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
         self, db_id: int, force_refresh: str = "false"
     ) -> FlaskResponse:
         logger.warning(
-            "This API endpoint is deprecated and will be removed in version 1.0.0"
+            "This API endpoint is deprecated and will be removed in version 2.0.0"
         )
         db_id = int(db_id)
         database = db.session.query(Database).get(db_id)
@@ -1181,7 +1184,10 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
         # the dashboard was open. it was use to avoid mid-air collision.
         remote_last_modified_time = data.get("last_modified_time")
         current_last_modified_time = dash.changed_on.replace(microsecond=0).timestamp()
-        if remote_last_modified_time < current_last_modified_time:
+        if (
+            remote_last_modified_time
+            and remote_last_modified_time < current_last_modified_time
+        ):
             return json_error_response(
                 __(
                     "This dashboard was changed recently. "
@@ -1235,7 +1241,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
         uri = request.json.get("uri")
         try:
             if app.config["PREVENT_UNSAFE_DB_CONNECTIONS"]:
-                check_sqlalchemy_uri(uri)
+                check_sqlalchemy_uri(make_url(uri))
             # if the database already exists in the database, only its safe
             # (password-masked) URI would be shown in the UI and would be passed in the
             # form data so if the database already exists and the form was submitted
@@ -1295,7 +1301,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
             return json_error_response(
                 _("Connection failed, please check your connection settings"), 400
             )
-        except DBSecurityException as ex:
+        except SupersetSecurityException as ex:
             logger.warning("Stopped an unsafe database connection")
             return json_error_response(_(str(ex)), 400)
         except Exception as ex:  # pylint: disable=broad-except
@@ -1399,6 +1405,9 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
                     "item_url": item_url,
                     "item_title": item_title,
                     "time": log.dttm,
+                    "time_delta_humanized": humanize.naturaltime(
+                        datetime.now() - log.dttm
+                    ),
                 }
             )
         return json_success(json.dumps(payload, default=utils.json_int_dttm_ser))
@@ -1408,6 +1417,9 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
     @event_logger.log_this
     @expose("/csrf_token/", methods=["GET"])
     def csrf_token(self) -> FlaskResponse:
+        logger.warning(
+            "This API endpoint is deprecated and will be removed in version 2.0.0"
+        )
         return Response(
             self.render_template("superset/csrf_token.json"), mimetype="text/json"
         )
@@ -1754,7 +1766,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
     ) -> FlaskResponse:
         """Gets and toggles published status on dashboards"""
         logger.warning(
-            "This API endpoint is deprecated and will be removed in version 1.0.0"
+            "This API endpoint is deprecated and will be removed in version 2.0.0"
         )
         session = db.session()
         Role = ab_models.Role
@@ -1835,10 +1847,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
         superset_can_explore = security_manager.can_access("can_explore", "Superset")
         superset_can_csv = security_manager.can_access("can_csv", "Superset")
         slice_can_edit = security_manager.can_access("can_edit", "SliceModelView")
-
-        standalone_mode = (
-            request.args.get(utils.ReservedUrlParameters.STANDALONE.value) == "true"
-        )
+        standalone_mode = ReservedUrlParameters.is_standalone_mode()
         edit_mode = (
             request.args.get(utils.ReservedUrlParameters.EDIT_MODE.value) == "true"
         )
@@ -2071,7 +2080,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
     ) -> FlaskResponse:
         logging.warning(
             "%s.select_star "
-            "This API endpoint is deprecated and will be removed in version 1.0.0",
+            "This API endpoint is deprecated and will be removed in version 2.0.0",
             self.__class__.__name__,
         )
         stats_logger.incr(f"{self.__class__.__name__}.select_star.init")
@@ -2776,7 +2785,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
         )
 
     @event_logger.log_this
-    @expose("/welcome")
+    @expose("/welcome/")
     def welcome(self) -> FlaskResponse:
         """Personalized welcome page"""
         if not g.user or not g.user.get_id():
@@ -2790,7 +2799,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
             .scalar()
         )
         if welcome_dashboard_id:
-            return self.dashboard(str(welcome_dashboard_id))
+            return self.dashboard(dashboard_id_or_slug=str(welcome_dashboard_id))
 
         payload = {
             "user": bootstrap_user_data(g.user),
@@ -2877,7 +2886,7 @@ class Superset(BaseSupersetView):  # pylint: disable=too-many-public-methods
 
     @has_access
     @event_logger.log_this
-    @expose("/sqllab", methods=["GET", "POST"])
+    @expose("/sqllab/", methods=["GET", "POST"])
     def sqllab(self) -> FlaskResponse:
         """SQL Editor"""
         payload = {

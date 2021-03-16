@@ -1,6 +1,3 @@
-import { Filter } from '../types';
-import { CascadeFilter } from './types';
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -19,6 +16,9 @@ import { CascadeFilter } from './types';
  * specific language governing permissions and limitations
  * under the License.
  */
+
+import { Filter } from '../types';
+import { CascadeFilter } from './types';
 
 export function mapParentFiltersToChildren(
   filters: Filter[],

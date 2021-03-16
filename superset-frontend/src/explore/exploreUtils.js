@@ -22,12 +22,15 @@ import { useCallback, useEffect } from 'react';
 import URI from 'urijs';
 import {
   buildQueryContext,
+  ensureIsArray,
   getChartBuildQueryRegistry,
   getChartMetadataRegistry,
 } from '@superset-ui/core';
 import { availableDomains } from 'src/utils/hostNamesConfig';
 import { safeStringify } from 'src/utils/safeStringify';
+import { URL_PARAMS } from 'src/constants';
 import { MULTI_OPERATORS } from './constants';
+import { DashboardStandaloneMode } from '../dashboard/util/constants';
 
 const MAX_URL_LENGTH = 8000;
 
@@ -99,8 +102,8 @@ export function getExploreLongUrl(
     search[key] = extraSearch[key];
   });
   search.form_data = safeStringify(formData);
-  if (endpointType === 'standalone') {
-    search.standalone = 'true';
+  if (endpointType === URL_PARAMS.standalone) {
+    search.standalone = DashboardStandaloneMode.HIDE_NAV;
   }
   const url = uri.directory(directory).search(search).toString();
   if (!allowOverflow && url.length > MAX_URL_LENGTH) {
@@ -172,8 +175,8 @@ export function getExploreUrl({
   if (endpointType === 'csv') {
     search.csv = 'true';
   }
-  if (endpointType === 'standalone') {
-    search.standalone = 'true';
+  if (endpointType === URL_PARAMS.standalone) {
+    search.standalone = '1';
   }
   if (endpointType === 'query') {
     search.query = 'true';
@@ -205,6 +208,7 @@ export const buildV1ChartDataPayload = ({
   force,
   resultFormat,
   resultType,
+  setDataMask,
 }) => {
   const buildQuery =
     getChartBuildQueryRegistry().get(formData.viz_type) ??
@@ -214,12 +218,19 @@ export const buildV1ChartDataPayload = ({
           ...baseQueryObject,
         },
       ]));
-  return buildQuery({
-    ...formData,
-    force,
-    result_format: resultFormat,
-    result_type: resultType,
-  });
+  return buildQuery(
+    {
+      ...formData,
+      force,
+      result_format: resultFormat,
+      result_type: resultType,
+    },
+    {
+      hooks: {
+        setDataMask,
+      },
+    },
+  );
 };
 
 export const getLegacyEndpointType = ({ resultType, resultFormat }) =>
@@ -309,20 +320,14 @@ export const getSimpleSQLExpression = (subject, operator, comparator) => {
     expression += ` ${operator}`;
     const firstValue =
       isMulti && Array.isArray(comparator) ? comparator[0] : comparator;
-    let comparatorArray;
-    if (comparator === undefined || comparator === null) {
-      comparatorArray = [];
-    } else if (Array.isArray(comparator)) {
-      comparatorArray = comparator;
-    } else {
-      comparatorArray = [comparator];
-    }
+    const comparatorArray = ensureIsArray(comparator);
     const isString =
       firstValue !== undefined && Number.isNaN(Number(firstValue));
     const quote = isString ? "'" : '';
     const [prefix, suffix] = isMulti ? ['(', ')'] : ['', ''];
     const formattedComparators = comparatorArray.map(
-      val => `${quote}${isString ? val.replace("'", "''") : val}${quote}`,
+      val =>
+        `${quote}${isString ? String(val).replace("'", "''") : val}${quote}`,
     );
     if (comparatorArray.length > 0) {
       expression += ` ${prefix}${formattedComparators.join(', ')}${suffix}`;

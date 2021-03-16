@@ -16,49 +16,63 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { ExtraFormData, QueryFormData, QueryObject } from '@superset-ui/core';
+import {
+  ExtraFormData,
+  QueryFormData,
+  getChartMetadataRegistry,
+  QueryObject,
+  Behavior,
+} from '@superset-ui/core';
+import { Charts } from 'src/dashboard/types';
 import { RefObject } from 'react';
+import { FeatureFlag, isFeatureEnabled } from 'src/featureFlags';
 import { Filter } from './types';
-import { NativeFiltersState } from '../../reducers/types';
+import { DataMaskStateWithId } from '../../../dataMask/types';
 
 export const getFormData = ({
-  datasetId = 18,
+  datasetId,
   cascadingFilters = {},
   groupby,
-  allowsMultipleValues = false,
-  defaultValue,
   currentValue,
-  inverseSelection,
   inputRef,
+  defaultValue,
+  controlValues,
+  filterType,
 }: Partial<Filter> & {
   datasetId?: number;
   inputRef?: RefObject<HTMLInputElement>;
   cascadingFilters?: object;
-  groupby: string;
-}): Partial<QueryFormData> => ({
-  adhoc_filters: [],
-  datasource: `${datasetId}__table`,
-  extra_filters: [],
-  extra_form_data: cascadingFilters,
-  granularity_sqla: 'ds',
-  groupby: [groupby],
-  inverseSelection,
-  metrics: ['count'],
-  multiSelect: allowsMultipleValues,
-  row_limit: 10000,
-  showSearch: true,
-  currentValue,
-  time_range: 'No filter',
-  time_range_endpoints: ['inclusive', 'exclusive'],
-  url_params: {},
-  viz_type: 'filter_select',
-  // TODO: need process per filter type after will be decided approach
-  defaultValue,
-  inputRef,
-});
+  groupby?: string;
+}): Partial<QueryFormData> => {
+  const otherProps: { datasource?: string; groupby?: string[] } = {};
+  if (datasetId) {
+    otherProps.datasource = `${datasetId}__table`;
+  }
+  if (groupby) {
+    otherProps.groupby = [groupby];
+  }
+  return {
+    ...controlValues,
+    ...otherProps,
+    adhoc_filters: [],
+    extra_filters: [],
+    extra_form_data: cascadingFilters,
+    granularity_sqla: 'ds',
+    metrics: ['count'],
+    row_limit: 10000,
+    showSearch: true,
+    currentValue,
+    defaultValue,
+    time_range: 'No filter',
+    time_range_endpoints: ['inclusive', 'exclusive'],
+    url_params: {},
+    viz_type: filterType,
+    inputRef,
+  };
+};
 
 export function mergeExtraFormData(
-  originalExtra: ExtraFormData,
+  originalExtra: ExtraFormData = {},
   newExtra: ExtraFormData,
 ): ExtraFormData {
   const {
@@ -68,6 +82,7 @@ export function mergeExtraFormData(
   const {
     override_form_data: newOverride = {},
     append_form_data: newAppend = {},
+    custom_form_data: newCustom = {},
   } = newExtra;
 
   const appendKeys = new Set([
@@ -78,13 +93,14 @@ export function mergeExtraFormData(
   appendKeys.forEach(key => {
     appendFormData[key] = [
       // @ts-ignore
-      ...(originalAppend[key] || []),
+      ...(originalAppend?.[key] || []),
       // @ts-ignore
-      ...(newAppend[key] || []),
+      ...(newAppend?.[key] || []),
     ];
   });
 
   return {
+    custom_form_data: newCustom,
     override_form_data: {
       ...originalOverride,
       ...newOverride,
@@ -93,14 +109,32 @@ export function mergeExtraFormData(
   };
 }
 
+export function isCrossFilter(vizType: string) {
+  // @ts-ignore need export from superset-ui `ItemWithValue`
+  return getChartMetadataRegistry().items[vizType]?.value.behaviors?.includes(
+    Behavior.CROSS_FILTER,
+  );
+}
+
 export function getExtraFormData(
-  nativeFilters: NativeFiltersState,
+  dataMask: DataMaskStateWithId,
+  charts: Charts,
+  filterIdsAppliedOnChart: string[],
 ): ExtraFormData {
   let extraFormData: ExtraFormData = {};
-  Object.keys(nativeFilters.filters).forEach(key => {
-    const filterState = nativeFilters.filtersState[key] || {};
-    const { extraFormData: newExtra = {} } = filterState;
+  filterIdsAppliedOnChart.forEach(key => {
+    const singleDataMask = dataMask.nativeFilters[key] || {};
+    const { extraFormData: newExtra = {} } = singleDataMask;
     extraFormData = mergeExtraFormData(extraFormData, newExtra);
   });
+  if (isFeatureEnabled(FeatureFlag.DASHBOARD_CROSS_FILTERS)) {
+    Object.entries(charts).forEach(([key, chart]) => {
+      if (isCrossFilter(chart?.formData?.viz_type)) {
+        const singleDataMask = dataMask.crossFilters[key] || {};
+        const { extraFormData: newExtra = {} } = singleDataMask;
+        extraFormData = mergeExtraFormData(extraFormData, newExtra);
+      }
+    });
+  }
   return extraFormData;
 }

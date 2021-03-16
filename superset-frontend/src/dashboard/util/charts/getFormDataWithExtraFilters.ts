@@ -20,9 +20,14 @@ import { isEqual } from 'lodash';
 import {
   CategoricalColorNamespace,
   DataRecordFilters,
+  JsonObject,
 } from '@superset-ui/core';
-import { ChartQueryPayload, LayoutItem } from 'src/dashboard/types';
-import { getExtraFormData } from 'src/dashboard/components/nativeFilters/utils';
+import { ChartQueryPayload, Charts, LayoutItem } from 'src/dashboard/types';
+import {
+  getExtraFormData,
+  mergeExtraFormData,
+} from 'src/dashboard/components/nativeFilters/utils';
+import { DataMaskStateWithId } from 'src/dataMask/types';
 import getEffectiveExtraFilters from './getEffectiveExtraFilters';
 import { getActiveNativeFilters } from '../activeDashboardNativeFilters';
 import { NativeFiltersState } from '../../reducers/types';
@@ -34,11 +39,13 @@ const cachedFormdataByChart = {};
 
 export interface GetFormDataWithExtraFiltersArguments {
   chart: ChartQueryPayload;
+  charts: Charts;
   filters: DataRecordFilters;
   layout: { [key: string]: LayoutItem };
   colorScheme?: string;
   colorNamespace?: string;
   sliceId: number;
+  dataMask: DataMaskStateWithId;
   nativeFilters: NativeFiltersState;
 }
 
@@ -47,12 +54,14 @@ export interface GetFormDataWithExtraFiltersArguments {
 // filters param only contains those applicable to this chart.
 export default function getFormDataWithExtraFilters({
   chart,
+  charts,
   filters,
+  nativeFilters,
   colorScheme,
   colorNamespace,
   sliceId,
   layout,
-  nativeFilters,
+  dataMask,
 }: GetFormDataWithExtraFiltersArguments) {
   // Propagate color mapping to chart
   const scale = CategoricalColorNamespace.getScale(colorScheme, colorNamespace);
@@ -66,21 +75,36 @@ export default function getFormDataWithExtraFilters({
     cachedFormdataByChart[sliceId].color_namespace === colorNamespace &&
     isEqual(cachedFormdataByChart[sliceId].label_colors, labelColors) &&
     !!cachedFormdataByChart[sliceId] &&
-    nativeFilters === undefined
+    dataMask === undefined
   ) {
     return cachedFormdataByChart[sliceId];
   }
 
-  let extraData = {};
-  const activeNativeFilters = getActiveNativeFilters({ nativeFilters, layout });
-  const isAffectedChart = Object.values(activeNativeFilters).some(({ scope }) =>
-    scope.includes(chart.id),
-  );
-  if (isAffectedChart) {
+  let extraData: { extra_form_data?: JsonObject } = {};
+  const activeNativeFilters = getActiveNativeFilters({
+    dataMask,
+    layout,
+    filters: nativeFilters.filters,
+  });
+  const filterIdsAppliedOnChart = Object.entries(activeNativeFilters)
+    .filter(([, { scope }]) => scope.includes(chart.id))
+    .map(([filterId]) => filterId);
+  if (filterIdsAppliedOnChart.length) {
     extraData = {
-      extra_form_data: getExtraFormData(nativeFilters),
+      extra_form_data: getExtraFormData(
+        dataMask,
+        charts,
+        filterIdsAppliedOnChart,
+      ),
     };
   }
+
+  const { extraFormData: newExtra = {} } =
+    dataMask?.ownFilters?.[chart.id] ?? {};
+  extraData.extra_form_data = mergeExtraFormData(
+    extraData?.extra_form_data,
+    newExtra,
+  );
 
   const formData = {
     ...chart.formData,

@@ -16,9 +16,13 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { getChartIdsInFilterScope } from '../../util/activeDashboardFilters';
-import { TIME_FILTER_MAP } from '../../../visualizations/FilterBox/FilterBox';
-import { NativeFiltersState, NativeFilterState } from '../../reducers/types';
+import { TIME_FILTER_MAP } from 'src/explore/constants';
+import { getChartIdsInFilterScope } from 'src/dashboard/util/activeDashboardFilters';
+import { NativeFiltersState } from 'src/dashboard/reducers/types';
+import { DataMaskStateWithId } from 'src/dataMask/types';
+import { Layout } from '../../types';
+import { getTreeCheckedItems } from '../nativeFilters/FiltersConfigModal/FiltersConfigForm/FilterScope/utils';
+import { FilterValue } from '../nativeFilters/types';
 
 export enum IndicatorStatus {
   Unset = 'UNSET',
@@ -49,7 +53,7 @@ const selectIndicatorValue = (
   columnKey: string,
   filter: Filter,
   datasource: Datasource,
-): string[] => {
+): FilterValue => {
   const values = filter.columns[columnKey];
   const arrValues = Array.isArray(values) ? values : [values];
 
@@ -127,9 +131,9 @@ const getRejectedColumns = (chart: any): Set<string> =>
   );
 
 export type Indicator = {
-  column: string;
+  column?: string;
   name: string;
-  value: string[];
+  value: FilterValue;
   status: IndicatorStatus;
   path: string[];
 };
@@ -169,50 +173,58 @@ export const selectIndicatorsForChart = (
   return indicators;
 };
 
-const selectNativeIndicatorValue = (
-  filterState: NativeFilterState,
-): string[] => {
-  const filters = filterState?.extraFormData?.append_form_data?.filters;
-  if (filters?.length) {
-    const filter = filters[0];
-    if ('val' in filter) {
-      const val = filter.val as string | string[];
-      if (Array.isArray(val)) {
-        return val;
-      }
-      return [val];
-    }
-  }
-  return [];
-};
-
 export const selectNativeIndicatorsForChart = (
   nativeFilters: NativeFiltersState,
+  dataMask: DataMaskStateWithId,
   chartId: number,
   charts: any,
+  dashboardLayout: Layout,
 ): Indicator[] => {
   const chart = charts[chartId];
 
   const appliedColumns = getAppliedColumns(chart);
   const rejectedColumns = getRejectedColumns(chart);
 
-  const getStatus = (column: string, value: string[]): IndicatorStatus => {
-    if (rejectedColumns.has(column)) return IndicatorStatus.Incompatible;
-    if (appliedColumns.has(column) && value.length > 0) {
+  const getStatus = (
+    value: FilterValue,
+    isAffectedByScope: boolean,
+    column?: string,
+  ): IndicatorStatus => {
+    // a filter is only considered unset if it's value is null
+    const hasValue = value !== null;
+    if (!isAffectedByScope) {
+      return IndicatorStatus.Unset;
+    }
+    if (!column && hasValue) {
+      // Filter without datasource
+      return IndicatorStatus.Applied;
+    }
+    if (column && rejectedColumns.has(column))
+      return IndicatorStatus.Incompatible;
+    if (column && appliedColumns.has(column) && hasValue) {
       return IndicatorStatus.Applied;
     }
     return IndicatorStatus.Unset;
   };
 
   const indicators = Object.values(nativeFilters.filters).map(nativeFilter => {
-    const column = nativeFilter.targets[0].column.name;
-    const filterState = nativeFilters.filtersState[nativeFilter.id];
-    const value = selectNativeIndicatorValue(filterState);
+    const isAffectedByScope = getTreeCheckedItems(
+      nativeFilter.scope,
+      dashboardLayout,
+    ).some(
+      layoutItem => dashboardLayout[layoutItem]?.meta?.chartId === chartId,
+    );
+    const column = nativeFilter.targets[0]?.column?.name;
+    const dataMaskNativeFilters = dataMask.nativeFilters?.[nativeFilter.id];
+    let value = dataMaskNativeFilters?.currentState?.value ?? [];
+    if (!Array.isArray(value)) {
+      value = [value];
+    }
     return {
       column,
       name: nativeFilter.name,
       path: [nativeFilter.id],
-      status: getStatus(column, value),
+      status: getStatus(value, isAffectedByScope, column),
       value,
     };
   });

@@ -48,12 +48,11 @@ from sqlalchemy import (
 from sqlalchemy.orm import backref, Query, relationship, RelationshipProperty, Session
 from sqlalchemy.schema import UniqueConstraint
 from sqlalchemy.sql import column, ColumnElement, literal_column, table, text
-from sqlalchemy.sql.expression import Label, Select, TextAsFrom
+from sqlalchemy.sql.expression import Label, Select, TextAsFrom, TextClause
 from sqlalchemy.types import TypeEngine
 
 from superset import app, db, is_feature_enabled, security_manager
 from superset.connectors.base.models import BaseColumn, BaseDatasource, BaseMetric
-from superset.constants import NULL_STRING
 from superset.db_engine_specs.base import TimestampExpression
 from superset.errors import ErrorLevel, SupersetError, SupersetErrorType
 from superset.exceptions import QueryObjectValidationError, SupersetSecurityException
@@ -70,6 +69,7 @@ from superset.result_set import SupersetResultSet
 from superset.sql_parse import ParsedQuery
 from superset.typing import Metric, QueryObjectDict
 from superset.utils import core as utils
+from superset.utils.core import GenericDataType
 
 config = app.config
 metadata = Model.metadata  # pylint: disable=no-member
@@ -187,20 +187,20 @@ class TableColumn(Model, BaseColumn):
         """
         Check if the column has a numeric datatype.
         """
-        db_engine_spec = self.table.database.db_engine_spec
-        return db_engine_spec.is_db_column_type_match(
-            self.type, utils.GenericDataType.NUMERIC
-        )
+        column_spec = self.table.database.db_engine_spec.get_column_spec(self.type)
+        if column_spec is None:
+            return False
+        return column_spec.generic_type == GenericDataType.NUMERIC
 
     @property
     def is_string(self) -> bool:
         """
         Check if the column has a string datatype.
         """
-        db_engine_spec = self.table.database.db_engine_spec
-        return db_engine_spec.is_db_column_type_match(
-            self.type, utils.GenericDataType.STRING
-        )
+        column_spec = self.table.database.db_engine_spec.get_column_spec(self.type)
+        if column_spec is None:
+            return False
+        return column_spec.generic_type == GenericDataType.STRING
 
     @property
     def is_temporal(self) -> bool:
@@ -212,10 +212,10 @@ class TableColumn(Model, BaseColumn):
         """
         if self.is_dttm is not None:
             return self.is_dttm
-        db_engine_spec = self.table.database.db_engine_spec
-        return db_engine_spec.is_db_column_type_match(
-            self.type, utils.GenericDataType.TEMPORAL
-        )
+        column_spec = self.table.database.db_engine_spec.get_column_spec(self.type)
+        if column_spec is None:
+            return False
+        return column_spec.is_dttm
 
     def get_sqla_col(self, label: Optional[str] = None) -> Column:
         label = label or self.column_name
@@ -223,7 +223,8 @@ class TableColumn(Model, BaseColumn):
             col = literal_column(self.expression)
         else:
             db_engine_spec = self.table.database.db_engine_spec
-            type_ = db_engine_spec.get_sqla_column_type(self.type)
+            column_spec = db_engine_spec.get_column_spec(self.type)
+            type_ = column_spec.sqla_type if column_spec else None
             col = column(self.column_name, type_=type_)
         col = self.table.make_sqla_column_compatible(col, label)
         return col
@@ -720,6 +721,18 @@ class SqlaTable(  # pylint: disable=too-many-public-methods,too-many-instance-at
         except (TypeError, json.JSONDecodeError):
             return {}
 
+    def get_fetch_values_predicate(self) -> TextClause:
+        tp = self.get_template_processor()
+        try:
+            return text(tp.process_template(self.fetch_values_predicate))
+        except TemplateError as ex:
+            raise QueryObjectValidationError(
+                _(
+                    "Error in jinja expression in fetch values predicate: %(msg)s",
+                    msg=ex.message,
+                )
+            )
+
     def values_for_column(self, column_name: str, limit: int = 10000) -> List[Any]:
         """Runs query against sqla to retrieve some
         sample values for the given column.
@@ -737,16 +750,7 @@ class SqlaTable(  # pylint: disable=too-many-public-methods,too-many-instance-at
             qry = qry.limit(limit)
 
         if self.fetch_values_predicate:
-            tp = self.get_template_processor()
-            try:
-                qry = qry.where(text(tp.process_template(self.fetch_values_predicate)))
-            except TemplateError as ex:
-                raise QueryObjectValidationError(
-                    _(
-                        "Error in jinja expression in fetch values predicate: %(msg)s",
-                        msg=ex.message,
-                    )
-                )
+            qry = qry.where(self.get_fetch_values_predicate())
 
         engine = self.database.get_sqla_engine()
         sql = "{}".format(qry.compile(engine, compile_kwargs={"literal_binds": True}))
@@ -898,6 +902,8 @@ class SqlaTable(  # pylint: disable=too-many-public-methods,too-many-instance-at
         orderby: Optional[List[Tuple[ColumnElement, bool]]] = None,
         extras: Optional[Dict[str, Any]] = None,
         order_desc: bool = True,
+        is_rowcount: bool = False,
+        apply_fetch_values_predicate: bool = False,
     ) -> SqlaQuery:
         """Querying any sqla table from this common interface"""
         template_kwargs = {
@@ -1060,23 +1066,36 @@ class SqlaTable(  # pylint: disable=too-many-public-methods,too-many-instance-at
                     target_column_is_numeric=col_obj.is_numeric,
                     is_list_target=is_list_target,
                 )
-                if op in (
-                    utils.FilterOperator.IN.value,
-                    utils.FilterOperator.NOT_IN.value,
-                ):
-                    cond = col_obj.get_sqla_col().in_(eq)
-                    if isinstance(eq, str) and NULL_STRING in eq:
-                        cond = or_(
-                            cond,
-                            col_obj.get_sqla_col()  # pylint: disable=singleton-comparison
-                            == None,
+                if is_list_target:
+                    assert isinstance(eq, (tuple, list))
+                    if len(eq) == 0:
+                        raise QueryObjectValidationError(
+                            _("Filter value list cannot be empty")
                         )
+                    if None in eq:
+                        eq = [x for x in eq if x is not None]
+                        is_null_cond = col_obj.get_sqla_col().is_(None)
+                        if eq:
+                            cond = or_(is_null_cond, col_obj.get_sqla_col().in_(eq))
+                        else:
+                            cond = is_null_cond
+                    else:
+                        cond = col_obj.get_sqla_col().in_(eq)
                     if op == utils.FilterOperator.NOT_IN.value:
                         cond = ~cond
                     where_clause_and.append(cond)
+                elif op == utils.FilterOperator.IS_NULL.value:
+                    where_clause_and.append(col_obj.get_sqla_col().is_(None))
+                elif op == utils.FilterOperator.IS_NOT_NULL.value:
+                    where_clause_and.append(col_obj.get_sqla_col().isnot(None))
                 else:
-                    if col_obj.is_numeric:
-                        eq = utils.cast_to_num(flt["val"])
+                    if eq is None:
+                        raise QueryObjectValidationError(
+                            _(
+                                "Must specify a value for filters "
+                                "with comparison operators"
+                            )
+                        )
                     if op == utils.FilterOperator.EQUALS.value:
                         where_clause_and.append(col_obj.get_sqla_col() == eq)
                     elif op == utils.FilterOperator.NOT_EQUALS.value:
@@ -1091,16 +1110,6 @@ class SqlaTable(  # pylint: disable=too-many-public-methods,too-many-instance-at
                         where_clause_and.append(col_obj.get_sqla_col() <= eq)
                     elif op == utils.FilterOperator.LIKE.value:
                         where_clause_and.append(col_obj.get_sqla_col().like(eq))
-                    elif op == utils.FilterOperator.IS_NULL.value:
-                        where_clause_and.append(
-                            col_obj.get_sqla_col()  # pylint: disable=singleton-comparison
-                            == None
-                        )
-                    elif op == utils.FilterOperator.IS_NOT_NULL.value:
-                        where_clause_and.append(
-                            col_obj.get_sqla_col()  # pylint: disable=singleton-comparison
-                            != None
-                        )
                     else:
                         raise QueryObjectValidationError(
                             _("Invalid filter operation type: %(op)s", op=op)
@@ -1132,6 +1141,8 @@ class SqlaTable(  # pylint: disable=too-many-public-methods,too-many-instance-at
                         )
                     )
                 having_clause_and += [sa.text("({})".format(having))]
+        if apply_fetch_values_predicate and self.fetch_values_predicate:
+            qry = qry.where(self.get_fetch_values_predicate())
         if granularity:
             qry = qry.where(and_(*(time_filters + where_clause_and)))
         else:
@@ -1150,6 +1161,8 @@ class SqlaTable(  # pylint: disable=too-many-public-methods,too-many-instance-at
                 col = self.adhoc_metric_to_sqla(col, columns_by_name)
             elif col in columns_by_name:
                 col = columns_by_name[col].get_sqla_col()
+            elif col in metrics_by_name:
+                col = metrics_by_name[col].get_sqla_col()
 
             if isinstance(col, Label):
                 label = col._label  # pylint: disable=protected-access
@@ -1251,10 +1264,21 @@ class SqlaTable(  # pylint: disable=too-many-public-methods,too-many-instance-at
                     result.df, dimensions, groupby_exprs_sans_timestamp
                 )
                 qry = qry.where(top_groups)
+        if is_rowcount:
+            if not db_engine_spec.allows_subqueries:
+                raise QueryObjectValidationError(
+                    _("Database does not support subqueries")
+                )
+            label = "rowcount"
+            col = self.make_sqla_column_compatible(literal_column("COUNT(*)"), label)
+            qry = select([col]).select_from(qry.select_from(tbl).alias("rowcount_qry"))
+            labels_expected = [label]
+        else:
+            qry = qry.select_from(tbl)
         return SqlaQuery(
             extra_cache_keys=extra_cache_keys,
             labels_expected=labels_expected,
-            sqla_query=qry.select_from(tbl),
+            sqla_query=qry,
             prequeries=prequeries,
         )
 

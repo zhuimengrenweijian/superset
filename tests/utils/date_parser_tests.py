@@ -17,6 +17,10 @@
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+from superset.charts.commands.exceptions import (
+    TimeRangeParseFailError,
+    TimeRangeUnclearError,
+)
 from superset.utils.date_parser import (
     DateRangeMigration,
     datetime_eval,
@@ -84,8 +88,16 @@ class TestDateParser(SupersetTestCase):
         expected = datetime(2016, 6, 7), datetime(2016, 11, 7)
         self.assertEqual(result, expected)
 
+        result = get_since_until("Last 1 month")
+        expected = datetime(2016, 10, 7), datetime(2016, 11, 7)
+        self.assertEqual(result, expected)
+
         result = get_since_until("Next 5 months")
         expected = datetime(2016, 11, 7), datetime(2017, 4, 7)
+        self.assertEqual(result, expected)
+
+        result = get_since_until("Next 1 month")
+        expected = datetime(2016, 11, 7), datetime(2016, 12, 7)
         self.assertEqual(result, expected)
 
         result = get_since_until(since="5 days")
@@ -265,13 +277,13 @@ class TestDateParser(SupersetTestCase):
         self.assertEqual(parse_past_timedelta("1 month"), timedelta(31))
 
     def test_parse_human_datetime(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TimeRangeUnclearError):
             parse_human_datetime("  2 days  ")
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TimeRangeUnclearError):
             parse_human_datetime("2 day")
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TimeRangeParseFailError):
             parse_human_datetime("xxxxxxx")
 
     def test_DateRangeMigration(self):
@@ -291,3 +303,9 @@ class TestDateParser(SupersetTestCase):
 
         field = "   8 days   "
         self.assertRegex(field, DateRangeMigration.x_dateunit)
+
+        field = "last week"
+        self.assertNotRegex(field, DateRangeMigration.x_dateunit)
+
+        field = "10 years ago"
+        self.assertNotRegex(field, DateRangeMigration.x_dateunit)

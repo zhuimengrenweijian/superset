@@ -28,7 +28,7 @@ import os
 import sys
 from collections import OrderedDict
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional, Type, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Type, TYPE_CHECKING, Union
 
 from cachelib.base import BaseCache
 from celery.schedules import crontab
@@ -198,7 +198,7 @@ APP_ICON = "/static/assets/images/superset-logo-horiz.png"
 APP_ICON_WIDTH = 126
 
 # Uncomment to specify where clicking the logo would take the user
-# e.g. setting it to '/welcome' would take the user to '/superset/welcome'
+# e.g. setting it to '/' would take the user to '/superset/welcome/'
 LOGO_TARGET_PATH = None
 
 # Enables SWAGGER UI for superset openapi spec
@@ -328,6 +328,8 @@ DEFAULT_FEATURE_FLAGS: Dict[str, bool] = {
     # When True, this escapes HTML (rather than rendering it) in Markdown components
     "ESCAPE_MARKDOWN_HTML": False,
     "DASHBOARD_NATIVE_FILTERS": False,
+    "DASHBOARD_CROSS_FILTERS": False,
+    "DASHBOARD_NATIVE_FILTERS_SET": False,
     "GLOBAL_ASYNC_QUERIES": False,
     "VERSIONED_EXPORT": False,
     # Note that: RowLevelSecurityFilter is only given by default to the Admin role
@@ -343,6 +345,7 @@ DEFAULT_FEATURE_FLAGS: Dict[str, bool] = {
     # Enable experimental feature to search for other dashboards
     "OMNIBAR": False,
     "DASHBOARD_RBAC": False,
+    "ENABLE_EXPLORE_DRAG_AND_DROP": False,
 }
 
 # Set the default view to card/grid view if thumbnail support is enabled.
@@ -421,6 +424,7 @@ EXTRA_SEQUENTIAL_COLOR_SCHEMES: List[Dict[str, Any]] = []
 
 # ---------------------------------------------------
 # Thumbnail config (behind feature flag)
+# Also used by Alerts & Reports
 # ---------------------------------------------------
 THUMBNAIL_SELENIUM_USER = "admin"
 THUMBNAIL_CACHE_CONFIG: CacheConfig = {
@@ -622,7 +626,15 @@ class CeleryConfig:  # pylint: disable=too-few-public-methods
         "email_reports.schedule_hourly": {
             "task": "email_reports.schedule_hourly",
             "schedule": crontab(minute=1, hour="*"),
-        }
+        },
+        "reports.scheduler": {
+            "task": "reports.scheduler",
+            "schedule": crontab(minute="*", hour="*"),
+        },
+        "reports.prune_log": {
+            "task": "reports.prune_log",
+            "schedule": crontab(minute=0, hour=0),
+        },
     }
 
 
@@ -880,24 +892,35 @@ DB_CONNECTION_MUTATOR = None
 SQL_QUERY_MUTATOR = None
 
 # Enable / disable scheduled email reports
+#
+# Warning: This config key is deprecated and will be removed in version 2.0.0"
 ENABLE_SCHEDULED_EMAIL_REPORTS = False
 
 # Enable / disable Alerts, where users can define custom SQL that
 # will send emails with screenshots of charts or dashboards periodically
 # if it meets the criteria
+#
+# Warning: This config key is deprecated and will be removed in version 2.0.0"
 ENABLE_ALERTS = False
 
+# ---------------------------------------------------
+# Alerts & Reports
+# ---------------------------------------------------
 # Used for Alerts/Reports (Feature flask ALERT_REPORTS) to set the size for the
 # sliding cron window size, should be synced with the celery beat config minus 1 second
 ALERT_REPORTS_CRON_WINDOW_SIZE = 59
+# A custom prefix to use on all Alerts & Reports emails
+EMAIL_REPORTS_SUBJECT_PREFIX = "[Report] "
 
-# Slack API token for the superset reports
-SLACK_API_TOKEN = None
+# Slack API token for the superset reports, either string or callable
+SLACK_API_TOKEN: Optional[Union[Callable[[], str], str]] = None
 SLACK_PROXY = None
 
-# If enabled, certail features are run in debug mode
+# If enabled, certain features are run in debug mode
 # Current list:
 # * Emails are sent using dry-run mode (logging only)
+#
+# Warning: This config key is deprecated and will be removed in version 2.0.0"
 SCHEDULED_EMAIL_DEBUG_MODE = False
 
 # This auth provider is used by background (offline) tasks that need to access
@@ -906,26 +929,29 @@ SCHEDULED_EMAIL_DEBUG_MODE = False
 MACHINE_AUTH_PROVIDER_CLASS = "superset.utils.machine_auth.MachineAuthProvider"
 
 # Email reports - minimum time resolution (in minutes) for the crontab
+#
+# Warning: This config key is deprecated and will be removed in version 2.0.0"
 EMAIL_REPORTS_CRON_RESOLUTION = 15
 
 # The MAX duration (in seconds) a email schedule can run for before being killed
 # by celery.
+#
+# Warning: This config key is deprecated and will be removed in version 2.0.0"
 EMAIL_ASYNC_TIME_LIMIT_SEC = 300
-
-# Email report configuration
-# From address in emails
-EMAIL_REPORT_FROM_ADDRESS = "reports@superset.org"
 
 # Send bcc of all reports to this address. Set to None to disable.
 # This is useful for maintaining an audit trail of all email deliveries.
+#
+# Warning: This config key is deprecated and will be removed in version 2.0.0"
 EMAIL_REPORT_BCC_ADDRESS = None
 
 # User credentials to use for generating reports
 # This user should have permissions to browse all the dashboards and
 # slices.
 # TODO: In the future, login as the owner of the item to generate reports
+#
+# Warning: This config key is deprecated and will be removed in version 2.0.0"
 EMAIL_REPORTS_USER = "admin"
-EMAIL_REPORTS_SUBJECT_PREFIX = "[Report] "
 
 # The webdriver to use for generating reports. Use one of the following
 # firefox
@@ -1049,6 +1075,12 @@ SIP_15_TOAST_MESSAGE = (
     'class="alert-link">here</a>.'
 )
 
+# Turn this key to False to disable ownership check on the old dataset MVC and
+# datasource API /datasource/save.
+#
+# Warning: This config key is deprecated and will be removed in version 2.0.0"
+OLD_API_CHECK_DATASET_OWNERSHIP = True
+
 # SQLA table mutator, every time we fetch the metadata for a certain table
 # (superset.connectors.sqla.models.SqlaTable), we call this hook
 # to allow mutating the object with this callback.
@@ -1076,6 +1108,10 @@ GLOBAL_ASYNC_QUERIES_POLLING_DELAY = 500
 # It's possible to add a dataset health check logic which is specific to your system.
 # It will get executed each time when user open a chart's explore view.
 DATASET_HEALTH_CHECK = None
+
+# SQLalchemy link doc reference
+SQLALCHEMY_DOCS_URL = "https://docs.sqlalchemy.org/en/13/core/engines.html"
+SQLALCHEMY_DISPLAY_TEXT = "SQLAlchemy docs"
 
 # -------------------------------------------------------------------
 # *                WARNING:  STOP EDITING  HERE                    *

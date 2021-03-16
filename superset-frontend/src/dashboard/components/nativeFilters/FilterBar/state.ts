@@ -16,54 +16,38 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useDispatch, useSelector } from 'react-redux';
-import { useCallback } from 'react';
-import { ExtraFormData } from '@superset-ui/core';
-import { setExtraFormData } from 'src/dashboard/actions/nativeFilters';
-import { getInitialFilterState } from 'src/dashboard/reducers/nativeFilters';
+import { useSelector } from 'react-redux';
 import {
-  CurrentFilterState,
-  NativeFilterState,
+  Filters,
+  FilterSets as FilterSetsType,
   NativeFiltersState,
 } from 'src/dashboard/reducers/types';
+import { DataMaskUnitWithId } from 'src/dataMask/types';
 import { mergeExtraFormData } from '../utils';
 
-export function useFilters() {
-  return useSelector<any, NativeFilterState>(
-    state => state.nativeFilters.filters,
+export const useFilterSets = () =>
+  useSelector<any, FilterSetsType>(
+    state => state.nativeFilters.filterSets || {},
   );
-}
 
-export function useSetExtraFormData() {
-  const dispatch = useDispatch();
-  return useCallback(
-    (
-      id: string,
-      extraFormData: ExtraFormData,
-      currentState: CurrentFilterState,
-    ) => dispatch(setExtraFormData(id, extraFormData, currentState)),
-    [dispatch],
-  );
-}
+export const useFilters = () =>
+  useSelector<any, Filters>(state => state.nativeFilters.filters);
+
+export const useDataMask = () =>
+  useSelector<any, DataMaskUnitWithId>(state => state.dataMask.nativeFilters);
 
 export function useCascadingFilters(id: string) {
-  const nativeFilters = useSelector<any, NativeFiltersState>(
+  const { filters } = useSelector<any, NativeFiltersState>(
     state => state.nativeFilters,
   );
-  const { filters, filtersState } = nativeFilters;
   const filter = filters[id];
-  const cascadeParentIds = filter?.cascadeParentIds ?? [];
+  const cascadeParentIds: string[] = filter?.cascadeParentIds ?? [];
   let cascadedFilters = {};
+  const nativeFilters = useDataMask();
   cascadeParentIds.forEach(parentId => {
-    const parentState = filtersState[parentId] || {};
+    const parentState = nativeFilters[parentId] || {};
     const { extraFormData: parentExtra = {} } = parentState;
     cascadedFilters = mergeExtraFormData(cascadedFilters, parentExtra);
   });
   return cascadedFilters;
-}
-
-export function useFilterState(id: string) {
-  return useSelector<any, NativeFilterState>(
-    state => state.nativeFilters.filtersState[id] || getInitialFilterState(id),
-  );
 }

@@ -19,7 +19,7 @@ import logging
 from datetime import datetime
 from io import BytesIO
 from typing import Any, Dict
-from zipfile import ZipFile
+from zipfile import is_zipfile, ZipFile
 
 from flask import g, make_response, redirect, request, Response, send_file, url_for
 from flask_appbuilder.api import expose, protect, rison, safe
@@ -30,6 +30,7 @@ from werkzeug.wrappers import Response as WerkzeugResponse
 from werkzeug.wsgi import FileWrapper
 
 from superset import is_feature_enabled, thumbnail_cache
+from superset.charts.schemas import ChartEntityResponseSchema
 from superset.commands.exceptions import CommandInvalidError
 from superset.commands.importers.v1.utils import get_contents_from_bundle
 from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP, RouteMethod
@@ -54,8 +55,11 @@ from superset.dashboards.filters import (
     DashboardFavoriteFilter,
     DashboardFilter,
     DashboardTitleOrSlugFilter,
+    FilterRelatedRoles,
 )
 from superset.dashboards.schemas import (
+    DashboardDatasetSchema,
+    DashboardGetResponseSchema,
     DashboardPostSchema,
     DashboardPutSchema,
     get_delete_ids_schema,
@@ -89,6 +93,8 @@ class DashboardRestApi(BaseSupersetModelRestApi):
         RouteMethod.RELATED,
         "bulk_delete",  # not using RouteMethod since locally defined
         "favorite_status",
+        "get_charts",
+        "get_datasets",
     }
     resource_name = "dashboard"
     allow_browser_login = True
@@ -96,29 +102,6 @@ class DashboardRestApi(BaseSupersetModelRestApi):
     class_permission_name = "Dashboard"
     method_permission_name = MODEL_API_RW_METHOD_PERMISSION_MAP
 
-    show_columns = [
-        "id",
-        "charts",
-        "css",
-        "dashboard_title",
-        "json_metadata",
-        "owners.id",
-        "owners.username",
-        "owners.first_name",
-        "owners.last_name",
-        "roles.id",
-        "roles.name",
-        "changed_by_name",
-        "changed_by_url",
-        "changed_by.username",
-        "changed_on",
-        "position_json",
-        "published",
-        "url",
-        "slug",
-        "table_names",
-        "thumbnail_url",
-    ]
     list_columns = [
         "id",
         "published",
@@ -186,22 +169,32 @@ class DashboardRestApi(BaseSupersetModelRestApi):
 
     add_model_schema = DashboardPostSchema()
     edit_model_schema = DashboardPutSchema()
+    chart_entity_response_schema = ChartEntityResponseSchema()
+    dashboard_get_response_schema = DashboardGetResponseSchema()
+    dashboard_dataset_schema = DashboardDatasetSchema()
 
     base_filters = [["slice", DashboardFilter, lambda: []]]
 
     order_rel_fields = {
         "slices": ("slice_name", "asc"),
         "owners": ("first_name", "asc"),
+        "roles": ("name", "asc"),
     }
     related_field_filters = {
         "owners": RelatedFieldFilter("first_name", FilterRelatedOwners),
+        "roles": RelatedFieldFilter("name", FilterRelatedRoles),
         "created_by": RelatedFieldFilter("first_name", FilterRelatedOwners),
     }
-    allowed_rel_fields = {"owners", "created_by"}
+    allowed_rel_fields = {"owners", "roles", "created_by"}
 
     openapi_spec_tag = "Dashboards"
     """ Override the name set for this collection of endpoints """
-    openapi_spec_component_schemas = (GetFavStarIdsSchema,)
+    openapi_spec_component_schemas = (
+        ChartEntityResponseSchema,
+        DashboardGetResponseSchema,
+        DashboardDatasetSchema,
+        GetFavStarIdsSchema,
+    )
     apispec_parameter_schemas = {
         "get_delete_ids_schema": get_delete_ids_schema,
         "get_export_ids_schema": get_export_ids_schema,
@@ -215,6 +208,151 @@ class DashboardRestApi(BaseSupersetModelRestApi):
         if is_feature_enabled("THUMBNAILS"):
             self.include_route_methods = self.include_route_methods | {"thumbnail"}
         super().__init__()
+
+    @expose("/<id_or_slug>", methods=["GET"])
+    @protect()
+    @safe
+    @statsd_metrics
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.get",
+        log_to_statsd=False,
+    )
+    def get(self, id_or_slug: str) -> Response:
+        """Gets a dashboard
+        ---
+        get:
+          description: >-
+            Get a dashboard
+          parameters:
+          - in: path
+            schema:
+              type: string
+            name: id_or_slug
+            description: Either the id of the dashboard, or its slug
+          responses:
+            200:
+              description: Dashboard
+              content:
+                application/json:
+                  schema:
+                    type: object
+                    properties:
+                      result:
+                        $ref: '#/components/schemas/DashboardGetResponseSchema'
+            302:
+              description: Redirects to the current digest
+            400:
+              $ref: '#/components/responses/400'
+            401:
+              $ref: '#/components/responses/401'
+            404:
+              $ref: '#/components/responses/404'
+        """
+        # pylint: disable=arguments-differ
+        try:
+            dash = DashboardDAO.get_by_id_or_slug(id_or_slug)
+            result = self.dashboard_get_response_schema.dump(dash)
+            return self.response(200, result=result)
+        except DashboardNotFoundError:
+            return self.response_404()
+
+    @expose("/<id_or_slug>/datasets", methods=["GET"])
+    @protect()
+    @safe
+    @statsd_metrics
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.get_datasets",
+        log_to_statsd=False,
+    )
+    def get_datasets(self, id_or_slug: str) -> Response:
+        """Gets a dashboard's datasets
+                ---
+                get:
+                  description: >-
+                    Returns a list of a dashboard's datasets. Each dataset includes only
+                    the information necessary to render the dashboard's charts.
+                  parameters:
+                  - in: path
+                    schema:
+                      type: string
+                    name: id_or_slug
+                    description: Either the id of the dashboard, or its slug
+                  responses:
+                    200:
+                      description: Dashboard dataset definitions
+                      content:
+                        application/json:
+                          schema:
+                            type: object
+                            properties:
+                              result:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/DashboardDatasetSchema'
+                    302:
+                      description: Redirects to the current digest
+                    400:
+                      $ref: '#/components/responses/400'
+                    401:
+                      $ref: '#/components/responses/401'
+                    404:
+                      $ref: '#/components/responses/404'
+                """
+        try:
+            datasets = DashboardDAO.get_datasets_for_dashboard(id_or_slug)
+            result = [
+                self.dashboard_dataset_schema.dump(dataset) for dataset in datasets
+            ]
+            return self.response(200, result=result)
+        except DashboardNotFoundError:
+            return self.response_404()
+
+    @expose("/<pk>/charts", methods=["GET"])
+    @protect()
+    @safe
+    @statsd_metrics
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.get_charts",
+        log_to_statsd=False,
+    )
+    def get_charts(self, pk: int) -> Response:
+        """Gets the chart definitions for a given dashboard
+        ---
+        get:
+          description: >-
+            Get the chart definitions for a given dashboard
+          parameters:
+          - in: path
+            schema:
+              type: integer
+            name: pk
+          responses:
+            200:
+              description: Dashboard chart definitions
+              content:
+                application/json:
+                  schema:
+                    type: object
+                    properties:
+                      result:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ChartEntityResponseSchema'
+            302:
+              description: Redirects to the current digest
+            400:
+              $ref: '#/components/responses/400'
+            401:
+              $ref: '#/components/responses/401'
+            404:
+              $ref: '#/components/responses/404'
+        """
+        try:
+            charts = DashboardDAO.get_charts_for_dashboard(pk)
+            result = [self.chart_entity_response_schema.dump(chart) for chart in charts]
+            return self.response(200, result=result)
+        except DashboardNotFoundError:
+            return self.response_404()
 
     @expose("/", methods=["POST"])
     @protect()
@@ -706,11 +844,14 @@ class DashboardRestApi(BaseSupersetModelRestApi):
                   type: object
                   properties:
                     formData:
+                      description: upload file (ZIP or JSON)
                       type: string
                       format: binary
                     passwords:
+                      description: JSON map of passwords for each file
                       type: string
                     overwrite:
+                      description: overwrite existing databases?
                       type: bool
           responses:
             200:
@@ -734,8 +875,12 @@ class DashboardRestApi(BaseSupersetModelRestApi):
         upload = request.files.get("formData")
         if not upload:
             return self.response_400()
-        with ZipFile(upload) as bundle:
-            contents = get_contents_from_bundle(bundle)
+        if is_zipfile(upload):
+            with ZipFile(upload) as bundle:
+                contents = get_contents_from_bundle(bundle)
+        else:
+            upload.seek(0)
+            contents = {upload.filename: upload.read()}
 
         passwords = (
             json.loads(request.form["passwords"])

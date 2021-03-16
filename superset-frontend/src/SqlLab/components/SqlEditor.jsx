@@ -30,9 +30,6 @@ import debounce from 'lodash/debounce';
 import throttle from 'lodash/throttle';
 import StyledModal from 'src/common/components/Modal';
 import Mousetrap from 'mousetrap';
-
-import { Tooltip } from 'src/common/components/Tooltip';
-import Label from 'src/components/Label';
 import Button from 'src/components/Button';
 import Timer from 'src/components/Timer';
 import {
@@ -503,7 +500,7 @@ class SqlEditor extends React.PureComponent {
       <Menu onClick={this.handleMenuClick} style={{ width: 176 }}>
         <Menu.Item style={{ display: 'flex', justifyContent: 'space-between' }}>
           {' '}
-          <span>Autocomplete</span>{' '}
+          <span>{t('Autocomplete')}</span>{' '}
           <Switch
             checked={this.state.autocompleteEnabled}
             onChange={this.handleToggleAutocompleteEnabled}
@@ -547,7 +544,10 @@ class SqlEditor extends React.PureComponent {
     return (
       <AntdMenu>
         {[...new Set(LIMIT_DROPDOWN)].map(limit => (
-          <AntdMenu.Item onClick={() => this.setQueryLimit(limit)}>
+          <AntdMenu.Item
+            key={`${limit}`}
+            onClick={() => this.setQueryLimit(limit)}
+          >
             {/* // eslint-disable-line no-use-before-define */}
             <a role="button" styling="link">
               {this.convertToNumWithSpaces(limit)}
@@ -560,23 +560,6 @@ class SqlEditor extends React.PureComponent {
 
   renderEditorBottomBar() {
     const { queryEditor: qe } = this.props;
-    let limitWarning = null;
-    if (this.props.latestQuery?.results?.displayLimitReached) {
-      limitWarning = (
-        <Tooltip
-          id="tooltip"
-          placement="left"
-          title={t(
-            `It appears that the number of rows in the query results displayed
-           was limited on the server side to
-           the %s limit.`,
-            this.props.latestQuery.rows,
-          )}
-        >
-          <Label type="warning">LIMIT</Label>
-        </Tooltip>
-      );
-    }
 
     const { allow_ctas: allowCTAS, allow_cvas: allowCVAS } =
       this.props.database || {};
@@ -647,7 +630,6 @@ class SqlEditor extends React.PureComponent {
                   />
                 </span>
               )}
-            {limitWarning}
             <span>
               <LimitSelectStyled>
                 <Dropdown overlay={this.renderQueryLimit()} trigger="click">
@@ -687,7 +669,6 @@ class SqlEditor extends React.PureComponent {
           <span>
             <ShareSqlLabQuery queryEditor={qe} />
           </span>
-          {limitWarning}
           <Dropdown overlay={this.renderDropdown()} trigger="click">
             <Icon name="more-horiz" />
           </Dropdown>
@@ -707,6 +688,9 @@ class SqlEditor extends React.PureComponent {
         ? 'Specify name to CREATE VIEW AS schema in: public'
         : 'Specify name to CREATE TABLE AS schema in: public';
 
+    const leftBarStateClass = this.props.hideLeftBar
+      ? 'schemaPane-exit-done'
+      : 'schemaPane-enter-done';
     return (
       <div ref={this.sqlEditorRef} className="SqlEditor">
         <CSSTransition
@@ -714,7 +698,7 @@ class SqlEditor extends React.PureComponent {
           in={!this.props.hideLeftBar}
           timeout={300}
         >
-          <div className="schemaPane">
+          <div className={`schemaPane ${leftBarStateClass}`}>
             <SqlEditorLeftBar
               database={this.props.database}
               queryEditor={this.props.queryEditor}

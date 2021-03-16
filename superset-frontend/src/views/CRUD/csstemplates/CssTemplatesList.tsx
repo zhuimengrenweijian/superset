@@ -27,9 +27,8 @@ import { createFetchRelated, createErrorHandler } from 'src/views/CRUD/utils';
 import withToasts from 'src/messageToasts/enhancers/withToasts';
 import SubMenu, { SubMenuProps } from 'src/components/Menu/SubMenu';
 import DeleteModal from 'src/components/DeleteModal';
-import TooltipWrapper from 'src/components/TooltipWrapper';
+import { Tooltip } from 'src/common/components/Tooltip';
 import ConfirmStatusChange from 'src/components/ConfirmStatusChange';
-import { IconName } from 'src/components/Icon';
 import ActionsBar, { ActionProps } from 'src/components/ListView/ActionsBar';
 import ListView, { ListViewProps, Filters } from 'src/components/ListView';
 import CssTemplateModal from './CssTemplateModal';
@@ -146,13 +145,13 @@ function CssTemplatesList({
           }
 
           return (
-            <TooltipWrapper
-              label="allow-run-async-header"
-              tooltip={t('Last modified by %s', name)}
+            <Tooltip
+              id="allow-run-async-header-tooltip"
+              title={t('Last modified by %s', name)}
               placement="right"
             >
               <span>{changedOn}</span>
-            </TooltipWrapper>
+            </Tooltip>
           );
         },
         Header: t('Last modified'),
@@ -209,7 +208,7 @@ function CssTemplatesList({
                   label: 'edit-action',
                   tooltip: t('Edit template'),
                   placement: 'bottom',
-                  icon: 'edit' as IconName,
+                  icon: 'Edit',
                   onClick: handleEdit,
                 }
               : null,
@@ -218,7 +217,7 @@ function CssTemplatesList({
                   label: 'delete-action',
                   tooltip: t('Delete template'),
                   placement: 'bottom',
-                  icon: 'trash' as IconName,
+                  icon: 'Trash',
                   onClick: handleDelete,
                 }
               : null,

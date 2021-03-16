@@ -18,7 +18,7 @@
  */
 
 import componentTypes from 'src/dashboard/util/componentTypes';
-import { ExtraFormData, JsonObject } from '@superset-ui/core';
+import { DataMaskStateWithId } from 'src/dataMask/types';
 import { Filter } from '../components/nativeFilters/types';
 
 export enum Scoping {
@@ -45,11 +45,6 @@ export type RootState = {
 /** State of dashboardLayout in redux */
 export type Layout = { [key: string]: LayoutItem };
 
-/** State of nativeFilters currentState */
-export type CurrentFilterState = JsonObject & {
-  value: any;
-};
-
 /** State of charts in redux */
 export type Charts = { [key: number]: Chart };
 
@@ -72,18 +67,22 @@ export type LayoutItem = {
   };
 };
 
-/** Current state of the filter, stored in `nativeFilters` in redux */
-export type NativeFilterState = {
-  id: string; // ties this filter state to the config object
-  extraFormData?: ExtraFormData;
-  currentState?: CurrentFilterState;
+export type FilterSet = {
+  id: string;
+  name: string;
+  nativeFilters: Filters;
+  dataMask: Partial<DataMaskStateWithId>;
+};
+
+export type FilterSets = {
+  [filtersSetId: string]: FilterSet;
+};
+
+export type Filters = {
+  [filterId: string]: Filter;
 };
 
 export type NativeFiltersState = {
-  filters: {
-    [filterId: string]: Filter;
-  };
-  filtersState: {
-    [filterId: string]: NativeFilterState;
-  };
+  filters: Filters;
+  filterSets: FilterSets;
 };

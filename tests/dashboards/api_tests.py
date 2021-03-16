@@ -22,7 +22,8 @@ from io import BytesIO
 from typing import List, Optional
 from unittest.mock import patch
 from zipfile import is_zipfile, ZipFile
-from tests.fixtures.birth_names_dashboard import load_birth_names_dashboard_with_slices
+
+from tests.insert_chart_mixin import InsertChartMixin
 
 import pytest
 import prison
@@ -30,7 +31,7 @@ import yaml
 from sqlalchemy.sql import func
 
 from freezegun import freeze_time
-from sqlalchemy import and_, or_
+from sqlalchemy import and_
 from superset import db, security_manager
 from superset.models.dashboard import Dashboard
 from superset.models.core import FavStar, FavStarClassName
@@ -44,19 +45,22 @@ from tests.fixtures.importexport import (
     chart_config,
     database_config,
     dashboard_config,
+    dashboard_export,
     dashboard_metadata_config,
     dataset_config,
     dataset_metadata_config,
 )
 from tests.utils.get_dashboards import get_dashboards_ids
+from tests.fixtures.birth_names_dashboard import load_birth_names_dashboard_with_slices
 from tests.fixtures.world_bank_dashboard import load_world_bank_dashboard_with_slices
 
 DASHBOARDS_FIXTURE_COUNT = 10
 
 
-class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
+class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin, InsertChartMixin):
     resource_name = "dashboard"
 
+    dashboards: List[Dashboard] = []
     dashboard_data = {
         "dashboard_title": "title1_changed",
         "slug": "slug1_changed",
@@ -109,21 +113,35 @@ class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
         with self.create_app().app_context():
             dashboards = []
             admin = self.get_user("admin")
-            for cx in range(DASHBOARDS_FIXTURE_COUNT - 1):
-                dashboards.append(
-                    self.insert_dashboard(f"title{cx}", f"slug{cx}", [admin.id])
+            charts = []
+            half_dash_count = round(DASHBOARDS_FIXTURE_COUNT / 2)
+            for cx in range(DASHBOARDS_FIXTURE_COUNT):
+                dashboard = self.insert_dashboard(
+                    f"title{cx}",
+                    f"slug{cx}",
+                    [admin.id],
+                    slices=charts if cx < half_dash_count else [],
                 )
+                if cx < half_dash_count:
+                    chart = self.insert_chart(f"slice{cx}", [admin.id], 1, params="{}")
+                    charts.append(chart)
+                    dashboard.slices = [chart]
+                    db.session.add(dashboard)
+                dashboards.append(dashboard)
             fav_dashboards = []
-            for cx in range(round(DASHBOARDS_FIXTURE_COUNT / 2)):
+            for cx in range(half_dash_count):
                 fav_star = FavStar(
                     user_id=admin.id, class_name="Dashboard", obj_id=dashboards[cx].id
                 )
                 db.session.add(fav_star)
                 db.session.commit()
                 fav_dashboards.append(fav_star)
+            self.dashboards = dashboards
             yield dashboards
 
             # rollback changes
+            for chart in charts:
+                db.session.delete(chart)
             for dashboard in dashboards:
                 db.session.delete(dashboard)
             for fav_dashboard in fav_dashboards:
@@ -152,6 +170,109 @@ class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
             db.session.delete(dashboard)
             db.session.commit()
 
+    @pytest.mark.usefixtures("load_world_bank_dashboard_with_slices")
+    def test_get_dashboard_datasets(self):
+        self.login(username="admin")
+        uri = "api/v1/dashboard/world_health/datasets"
+        response = self.get_assert_metric(uri, "get_datasets")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data.decode("utf-8"))
+        dashboard = Dashboard.get("world_health")
+        expected_dataset_ids = set([s.datasource_id for s in dashboard.slices])
+        actual_dataset_ids = set([dataset["id"] for dataset in data["result"]])
+        self.assertEqual(actual_dataset_ids, expected_dataset_ids)
+
+    @pytest.mark.usefixtures("load_world_bank_dashboard_with_slices")
+    def test_get_dashboard_datasets_not_found(self):
+        self.login(username="alpha")
+        uri = "api/v1/dashboard/not_found/datasets"
+        response = self.get_assert_metric(uri, "get_datasets")
+        self.assertEqual(response.status_code, 404)
+
+    @pytest.mark.usefixtures("load_world_bank_dashboard_with_slices")
+    def test_get_dashboard_datasets_not_allowed(self):
+        self.login(username="gamma")
+        uri = "api/v1/dashboard/world_health/datasets"
+        response = self.get_assert_metric(uri, "get_datasets")
+        self.assertEqual(response.status_code, 404)
+
+    @pytest.mark.usefixtures("create_dashboards")
+    def get_dashboard_by_slug(self):
+        self.login(username="admin")
+        dashboard = self.dashboards[0]
+        uri = f"api/v1/dashboard/{dashboard.slug}"
+        response = self.get_assert_metric(uri, "get")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data.decode("utf-8"))
+        self.assertEqual(data["id"], dashboard.id)
+
+    @pytest.mark.usefixtures("create_dashboards")
+    def get_dashboard_by_bad_slug(self):
+        self.login(username="admin")
+        dashboard = self.dashboards[0]
+        uri = f"api/v1/dashboard/{dashboard.slug}-bad-slug"
+        response = self.get_assert_metric(uri, "get")
+        self.assertEqual(response.status_code, 404)
+
+    @pytest.mark.usefixtures("create_dashboards")
+    def get_dashboard_by_slug_not_allowed(self):
+        self.login(username="gamma")
+        dashboard = self.dashboards[0]
+        uri = f"api/v1/dashboard/{dashboard.slug}"
+        response = self.get_assert_metric(uri, "get")
+        self.assertEqual(response.status_code, 404)
+
+    @pytest.mark.usefixtures("create_dashboards")
+    def test_get_dashboard_charts(self):
+        """
+        Dashboard API: Test getting charts belonging to a dashboard
+        """
+        self.login(username="admin")
+        dashboard = self.dashboards[0]
+        uri = f"api/v1/dashboard/{dashboard.id}/charts"
+        response = self.get_assert_metric(uri, "get_charts")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data.decode("utf-8"))
+        self.assertEqual(len(data["result"]), 1)
+        self.assertEqual(
+            data["result"][0]["slice_name"], dashboard.slices[0].slice_name
+        )
+
+    @pytest.mark.usefixtures("create_dashboards")
+    def test_get_dashboard_charts_not_found(self):
+        """
+        Dashboard API: Test getting charts belonging to a dashboard that does not exist
+        """
+        self.login(username="admin")
+        bad_id = self.get_nonexistent_numeric_id(Dashboard)
+        uri = f"api/v1/dashboard/{bad_id}/charts"
+        response = self.get_assert_metric(uri, "get_charts")
+        self.assertEqual(response.status_code, 404)
+
+    @pytest.mark.usefixtures("create_dashboards")
+    def test_get_dashboard_charts_not_allowed(self):
+        """
+        Dashboard API: Test getting charts on a dashboard a user does not have access to
+        """
+        self.login(username="gamma")
+        dashboard = self.dashboards[0]
+        uri = f"api/v1/dashboard/{dashboard.id}/charts"
+        response = self.get_assert_metric(uri, "get_charts")
+        self.assertEqual(response.status_code, 404)
+
+    @pytest.mark.usefixtures("create_dashboards")
+    def test_get_dashboard_charts_empty(self):
+        """
+        Dashboard API: Test getting charts belonging to a dashboard without any charts
+        """
+        self.login(username="admin")
+        # the fixture setup assigns no charts to the second half of dashboards
+        uri = f"api/v1/dashboard/{self.dashboards[-1].id}/charts"
+        response = self.get_assert_metric(uri, "get_charts")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data.decode("utf-8"))
+        self.assertEqual(data["result"], [])
+
     def test_get_dashboard(self):
         """
         Dashboard API: Test get dashboard
@@ -173,6 +294,7 @@ class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
             "id": dashboard.id,
             "css": "",
             "dashboard_title": "title",
+            "datasources": [],
             "json_metadata": "",
             "owners": [
                 {
@@ -223,13 +345,14 @@ class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
         assert "can_write" in data["permissions"]
         assert len(data["permissions"]) == 2
 
+    @pytest.mark.usefixtures("load_world_bank_dashboard_with_slices")
     def test_get_dashboard_not_found(self):
         """
         Dashboard API: Test get dashboard not found
         """
-        max_id = db.session.query(func.max(Dashboard.id)).scalar()
+        bad_id = self.get_nonexistent_numeric_id(Dashboard)
         self.login(username="admin")
-        uri = f"api/v1/dashboard/{max_id + 1}"
+        uri = f"api/v1/dashboard/{bad_id}"
         rv = self.get_assert_metric(uri, "get")
         self.assertEqual(rv.status_code, 404)
 
@@ -574,7 +697,7 @@ class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
         self.assertEqual(rv.status_code, 404)
 
     @pytest.mark.usefixtures("create_dashboard_with_report", "create_dashboards")
-    def test_bulk_delete_dashboard_with_report(self):
+    def test_delete_bulk_dashboard_with_report(self):
         """
         Dashboard API: Test bulk delete with associated report
         """
@@ -1247,6 +1370,36 @@ class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
         db.session.delete(database)
         db.session.commit()
 
+    def test_import_dashboard_v0_export(self):
+        num_dashboards = db.session.query(Dashboard).count()
+
+        self.login(username="admin")
+        uri = "api/v1/dashboard/import/"
+
+        buf = BytesIO()
+        buf.write(json.dumps(dashboard_export).encode())
+        buf.seek(0)
+        form_data = {
+            "formData": (buf, "20201119_181105.json"),
+        }
+        rv = self.client.post(uri, data=form_data, content_type="multipart/form-data")
+        response = json.loads(rv.data.decode("utf-8"))
+
+        assert rv.status_code == 200
+        assert response == {"message": "OK"}
+        assert db.session.query(Dashboard).count() == num_dashboards + 1
+
+        dashboard = (
+            db.session.query(Dashboard).filter_by(dashboard_title="Births 2").one()
+        )
+        chart = dashboard.slices[0]
+        dataset = chart.table
+
+        db.session.delete(dashboard)
+        db.session.delete(chart)
+        db.session.delete(dataset)
+        db.session.commit()
+
     def test_import_dashboard_overwrite(self):
         """
         Dashboard API: Test import existing dashboard
@@ -1307,7 +1460,7 @@ class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
 
     def test_import_dashboard_invalid(self):
         """
-        Dataset API: Test import invalid dashboard
+        Dashboard API: Test import invalid dashboard
         """
         self.login(username="admin")
         uri = "api/v1/dashboard/import/"
@@ -1342,3 +1495,37 @@ class TestDashboardApi(SupersetTestCase, ApiOwnersTestCaseMixin):
         assert response == {
             "message": {"metadata.yaml": {"type": ["Must be equal to Dashboard."]}}
         }
+
+    def test_get_all_related_roles(self):
+        """
+        API: Test get filter related roles
+        """
+        self.login(username="admin")
+        uri = f"api/v1/dashboard/related/roles"
+
+        rv = self.client.get(uri)
+        assert rv.status_code == 200
+        response = json.loads(rv.data.decode("utf-8"))
+        roles = db.session.query(security_manager.role_model).all()
+        expected_roles = [str(role) for role in roles]
+        assert response["count"] == len(roles)
+
+        response_roles = [result["text"] for result in response["result"]]
+        for expected_role in expected_roles:
+            assert expected_role in response_roles
+
+    def test_get_filter_related_roles(self):
+        """
+        API: Test get filter related roles
+        """
+        self.login(username="admin")
+        argument = {"filter": "alpha"}
+        uri = f"api/v1/dashboard/related/roles?q={prison.dumps(argument)}"
+
+        rv = self.client.get(uri)
+        assert rv.status_code == 200
+        response = json.loads(rv.data.decode("utf-8"))
+        assert response["count"] == 1
+
+        response_roles = [result["text"] for result in response["result"]]
+        assert "Alpha" in response_roles
